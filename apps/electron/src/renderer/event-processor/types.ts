@@ -5,7 +5,11 @@
  * All agent events flow through a single pure function for consistent state transitions.
  */
 
-import type { Session, Message, PermissionRequest, CredentialRequest, TypedError, PermissionMode, SessionStatus, AuthRequest, ToolDisplayMeta } from '../../shared/types'
+import type { Session, SessionEvent, Message, PermissionRequest, CredentialRequest, TypedError, PermissionMode, SessionStatus, AuthRequest, ToolDisplayMeta } from '../../shared/types'
+
+/** Explicit SDK retry boundaries; keep their transport shape authoritative. */
+export type TextDiscardEvent = Extract<SessionEvent, { type: 'text_discard' }>
+export type RetryEvent = Extract<SessionEvent, { type: 'retry' }>
 
 /**
  * Streaming state for a session - replaces streamingTextRef
@@ -84,6 +88,8 @@ export interface ToolResultEvent {
   parentToolUseId?: string
   /** Timestamp from main process for consistent ordering */
   timestamp?: number
+  /** Replaces the input from tool_start (a browser_tool password fill, redacted once its result is known) */
+  toolInput?: Record<string, unknown>
 }
 
 /**
@@ -386,6 +392,21 @@ export interface WorkflowAgentCompletedEvent {
 }
 
 /**
+ * Task activity - what a running background task is doing (live summary, step count). The chip is
+ * updated in App.tsx's handleBackgroundTaskEvent; messages and session state do not change.
+ */
+export interface TaskActivityEvent {
+  type: 'task_activity'
+  sessionId: string
+  taskId: string
+  toolUseId?: string
+  summary?: string
+  lastToolName?: string
+  toolUses?: number
+  turnId?: string
+}
+
+/**
  * Shell backgrounded event - background bash shell started
  */
 export interface ShellBackgroundedEvent {
@@ -505,16 +526,15 @@ export interface SourceActivatedEvent {
 export interface UsageUpdateEvent {
   type: 'usage_update'
   sessionId: string
-  tokenUsage: {
-    inputTokens: number
-    contextWindow?: number
-  }
+  tokenUsage: Pick<NonNullable<Session['tokenUsage']>, 'inputTokens' | 'contextWindow' | 'contextUsage'>
 }
 
 /**
  * Union of all agent events
  */
 export type AgentEvent =
+  | TextDiscardEvent
+  | RetryEvent
   | TextDeltaEvent
   | TextCompleteEvent
   | ToolStartEvent
@@ -550,6 +570,7 @@ export type AgentEvent =
   | ShellBackgroundedEvent
   | TaskProgressEvent
   | TaskCompletedEvent
+  | TaskActivityEvent
   | WorkflowAgentCompletedEvent
   | UserMessageEvent
   | MessageAnnotationsUpdatedEvent

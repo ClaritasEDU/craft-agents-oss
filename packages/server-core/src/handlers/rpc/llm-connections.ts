@@ -8,7 +8,7 @@ import {
   validateStoredBackendConnection,
 } from '@craft-agent/shared/agent/backend'
 import { getModelRefreshService } from '@craft-agent/server-core/model-fetchers'
-import { parseTestConnectionError, createBuiltInConnection, validateModelList, piAuthProviderDisplayName, validateSetupTestInput, setupTestRequiresApiKey, resolveCustomEndpointSetup } from '@craft-agent/server-core/domain'
+import { parseTestConnectionError, createBuiltInConnection, validateModelList, piAuthProviderDisplayName, validateSetupTestInput, setupTestRequiresApiKey, resolveCustomEndpointSetup, resolveSetupTestApiKey, maskApiKey, isMaskedApiKey } from '@craft-agent/server-core/domain'
 import { getWorkspaceOrThrow, buildBackendHostRuntimeContext } from '@craft-agent/server-core/handlers'
 import { pushTyped, type RpcServer } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from '../handler-deps'
@@ -267,7 +267,7 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
       }
 
       // Store credential if provided (skip masked placeholders from GET_API_KEY)
-      const isMasked = setup.credential?.includes('••')
+      const isMasked = isMaskedApiKey(setup.credential)
       if (setup.credential && !isMasked) {
         const authType = pendingConnection.authType
         if (authType === 'oauth') {
@@ -329,13 +329,22 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
   // Unified connection test — uses the agent factory to spawn a real agent subprocess
   // and validate credentials via runMiniCompletion(). Same code path as actual chat.
   server.handle(RPC_CHANNELS.settings.TEST_LLM_CONNECTION_SETUP, async (_ctx, params: import('@craft-agent/shared/protocol').TestLlmConnectionParams): Promise<import('@craft-agent/shared/protocol').TestLlmConnectionResult> => {
-    const { provider, apiKey, baseUrl, model, piAuthProvider, customEndpoint } = params
-    const trimmedKey = apiKey?.trim() ?? ''
+    const { provider, apiKey, baseUrl, model, piAuthProvider, customEndpoint, connectionSlug } = params
     const allowEmptyApiKey = !setupTestRequiresApiKey(baseUrl)
 
-    if (!trimmedKey && !allowEmptyApiKey) {
-      return { success: false, error: 'API key is required' }
+    // The edit form echoes the stored key back as the GET_API_KEY placeholder;
+    // resolve it to the real credential instead of testing the bullets (OSS #1048).
+    const keyResolution = await resolveSetupTestApiKey(
+      { apiKey, connectionSlug, allowEmptyApiKey },
+      (slug) => getCredentialManager().getLlmApiKey(slug),
+    )
+    if (!keyResolution.ok) {
+      return { success: false, error: keyResolution.error }
     }
+    if (keyResolution.source === 'stored') {
+      deps.platform.logger?.info(`[testLlmConnectionSetup] Using the stored API key of ${connectionSlug}`)
+    }
+    const trimmedKey = keyResolution.apiKey
 
     const setupValidation = validateSetupTestInput({ provider, baseUrl, piAuthProvider })
     if (!setupValidation.valid) {
@@ -447,11 +456,8 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
     const manager = getCredentialManager()
     const key = await manager.getLlmApiKey(slug)
     if (!key) return null
-    // Show provider prefix (first 7 chars) + last 4 chars, mask the middle
-    if (key.length > 15) {
-      return key.slice(0, 7) + '••••••••' + key.slice(-4)
-    }
-    return '••••••••'
+    // Provider prefix + mask + last four; the test handler resolves this back by slug
+    return maskApiKey(key)
   })
 
   // Save (create or update) an LLM connection
@@ -777,7 +783,7 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
     error?: string
   }> => {
     try {
-      const { loginGitHubCopilot } = await import('@earendil-works/pi-ai/oauth')
+      const { loginGitHubCopilot } = await import('@craft-agent/shared/auth')
       const credentialManager = getCredentialManager()
 
       // Cancel any previous in-flight flow
@@ -786,9 +792,9 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
 
       deps.platform.logger?.info(`Starting GitHub Copilot OAuth device flow for connection: ${connectionSlug}`)
 
-      // Use Pi SDK's login flow — this handles the device code flow AND
-      // the critical Copilot token exchange that determines the correct
-      // API endpoint for the user's subscription tier (individual/business/enterprise).
+      // App-owned login flow (pi-ai 0.81.x no longer exports one) — handles the
+      // device code flow AND the critical Copilot token exchange that determines
+      // the correct API endpoint for the user's subscription tier via proxy-ep.
       const credentials = await loginGitHubCopilot({
         onDeviceCode: ({ userCode, verificationUri }) => {
           deps.platform.logger?.info(`[GitHub OAuth] Device code: ${userCode}`)
@@ -800,10 +806,6 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
           server.invokeClient(ctx.clientId, CLIENT_OPEN_EXTERNAL, verificationUri).catch(err => {
             deps.platform.logger?.warn(`Failed to open browser for GitHub OAuth: ${err}`)
           })
-        },
-        onPrompt: async () => {
-          // Pi SDK asks for GitHub Enterprise domain — return empty for github.com
-          return ''
         },
         onProgress: (message) => {
           deps.platform.logger?.info(`[GitHub OAuth] ${message}`)

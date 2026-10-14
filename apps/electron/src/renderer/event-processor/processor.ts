@@ -13,7 +13,7 @@
  */
 
 import type { SessionState, AgentEvent, ProcessResult } from './types'
-import { handleTextDelta, handleTextComplete } from './handlers/text'
+import { handleTextDelta, handleTextComplete, handleTextDiscard } from './handlers/text'
 import { handleToolStart, handleToolResult, handleTaskBackgrounded, handleShellBackgrounded, handleTaskProgress, handleTaskCompleted } from './handlers/tool'
 import {
   handleComplete,
@@ -33,6 +33,7 @@ import {
   handleCredentialRequest,
   handlePlanSubmitted,
   handleStatus,
+  handleRetry,
   handleInfo,
   handleInterrupted,
   handleTitleGenerated,
@@ -66,6 +67,12 @@ export function processEvent(
   event: AgentEvent
 ): ProcessResult {
   switch (event.type) {
+    case 'text_discard':
+      return { state: handleTextDiscard(state, event), effects: [] }
+
+    case 'retry':
+      return handleRetry(state, event)
+
     case 'text_delta': {
       const newState = handleTextDelta(state, event)
       return { state: newState, effects: [] }
@@ -107,8 +114,9 @@ export function processEvent(
     }
 
     case 'workflow_agent_completed':
-      // Live workflow fan-out progress — the chip counter is updated in App.tsx's
-      // handleBackgroundTaskEvent; nothing to change in message/session state here.
+    case 'task_activity':
+      // Live background-task progress (workflow fan-out count, an agent's summary): the chip is
+      // updated in App.tsx's handleBackgroundTaskEvent; nothing to change in message/session state.
       return { state, effects: [] }
 
     case 'complete':

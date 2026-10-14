@@ -14,11 +14,35 @@
 
 import { join } from 'node:path';
 import type { LoadedSource } from '../../sources/types.ts';
+import type { McpListCount } from '../../mcp/mcp-pool.ts';
 import { sourceNeedsAuthentication } from '../../sources/credential-manager.ts';
 import type { SourceManagerConfig } from './types.ts';
+import {
+  escapePromptXmlAttr,
+  sanitizePromptBody,
+  sanitizePromptLine,
+} from '../../prompts/prompt-sanitize.ts';
 
 /** Slugs exempt from guide.md prerequisite (internal sources) */
 const GUIDE_EXEMPT_SLUGS = new Set(['session']);
+const SOURCE_PROMPT_TAGS = ['sources', 'source_issue'] as const;
+
+/** MCP server instructions are shown once per source, flattened and cut to this length. */
+const MAX_SERVER_INSTRUCTIONS_CHARS = 600;
+
+function sourceLine(value: string | undefined): string {
+  return sanitizePromptLine(value ?? 'undefined', SOURCE_PROMPT_TAGS);
+}
+
+function sourceBody(value: string): string {
+  return sanitizePromptBody(value, SOURCE_PROMPT_TAGS);
+}
+
+/** "2 resources", "10+ prompts"; null for an absent or empty list. */
+function countLabel(count: McpListCount | undefined, noun: string): string | null {
+  if (!count || count.count === 0) return null;
+  return `${count.count}${count.more ? '+' : ''} ${noun}${count.count === 1 && !count.more ? '' : 's'}`;
+}
 
 /**
  * SourceManager provides centralized source state tracking for agent backends.
@@ -45,6 +69,8 @@ export class SourceManager {
   private intendedSlugs: Set<string> = new Set();
   private allSources: LoadedSource[] = [];
   private knownSlugs: Set<string> = new Set();
+  /** Sources whose MCP extras (resources, prompts, server instructions) were already shown */
+  private featuresShownSlugs: Set<string> = new Set();
 
   constructor(config: SourceManagerConfig = {}) {
     this.config = config;
@@ -137,6 +163,7 @@ export class SourceManager {
    */
   markSourceUnseen(slug: string): void {
     this.knownSlugs.delete(slug);
+    this.featuresShownSlugs.delete(slug);
   }
 
   /**
@@ -144,6 +171,7 @@ export class SourceManager {
    */
   resetSeenSources(): void {
     this.knownSlugs.clear();
+    this.featuresShownSlugs.clear();
   }
 
   // ============================================================
@@ -191,7 +219,8 @@ export class SourceManager {
     if (activeSlugs.length > 0) {
       const activeWithStatus = activeSlugs.map((slug) => {
         const hasWorkingTools = this.activeSlugs.has(slug);
-        return hasWorkingTools ? slug : `${slug} (no tools)`;
+        const safeSlug = sourceLine(slug);
+        return hasWorkingTools ? safeSlug : `${safeSlug} (no tools)`;
       });
       parts.push(`Active: ${activeWithStatus.join(', ')}`);
     } else {
@@ -206,7 +235,7 @@ export class SourceManager {
           : sourceNeedsAuthentication(s)
             ? 'needs auth'
             : 'inactive';
-        return `${s.config.slug} (${reason})`;
+        return `${sourceLine(s.config.slug)} (${reason})`;
       });
       parts.push(`Inactive: ${inactiveList.join(', ')}`);
     }
@@ -219,6 +248,19 @@ export class SourceManager {
       parts.push('Read each source\'s guide.md before first tool use — calls are blocked until guide is read.');
     }
 
+    // What connected MCP sources offer beyond tools, shown once per source (this
+    // block rides on every user message, so repeating it would only fill context):
+    // under the source's introduction, or on its own when the source connects
+    // after it was introduced (e.g. enabled mid-session).
+    const pendingFeatures = new Map<string, string[]>();
+    for (const slug of [...this.activeSlugs].sort()) {
+      if (this.featuresShownSlugs.has(slug)) continue;
+      const lines = this.formatSourceFeatures(slug);
+      if (lines.length === 0) continue;
+      pendingFeatures.set(slug, lines);
+      this.featuresShownSlugs.add(slug);
+    }
+
     // Source descriptions (shown once per session when first introduced)
     if (unseenSources.length > 0) {
       parts.push('');
@@ -229,11 +271,16 @@ export class SourceManager {
       let hasGuides = false;
       for (const s of unseenSources) {
         const tagline = s.config.tagline || s.config.provider;
-        parts.push(`- ${s.config.slug}: ${tagline}`);
+        parts.push(`- ${sourceLine(s.config.slug)}: ${sourceLine(tagline)}`);
         // Add guide path for sources that have guides (excluding internal sources)
         if (s.guide?.raw && !GUIDE_EXEMPT_SLUGS.has(s.config.slug)) {
-          parts.push(`  Guide: ${join(s.folderPath, 'guide.md')}`);
+          parts.push(`  Guide: ${sourceLine(join(s.folderPath, 'guide.md'))}`);
           hasGuides = true;
+        }
+        const featureLines = pendingFeatures.get(s.config.slug);
+        if (featureLines) {
+          parts.push(...featureLines);
+          pendingFeatures.delete(s.config.slug);
         }
       }
       if (hasGuides) {
@@ -242,15 +289,22 @@ export class SourceManager {
       }
     }
 
+    if (pendingFeatures.size > 0) {
+      parts.push('');
+      for (const [slug, lines] of pendingFeatures) {
+        parts.push(`- ${sourceLine(slug)}:`, ...lines);
+      }
+    }
+
     let output = `<sources>\n${parts.join('\n')}\n</sources>`;
 
     // Inject issue context for sources needing attention
     for (const s of sourcesNeedingAttention) {
-      const status = s.config.connectionStatus;
-      output += `\n\n<source_issue source="${s.config.slug}" status="${status}">`;
+      const status = s.config.connectionStatus ?? 'unknown';
+      output += `\n\n<source_issue source="${escapePromptXmlAttr(s.config.slug)}" status="${escapePromptXmlAttr(status)}">`;
 
       if (s.config.connectionError) {
-        output += `\nError: ${s.config.connectionError}`;
+        output += `\nError: ${sourceBody(s.config.connectionError)}`;
       }
 
       // Provide context-aware fix instructions
@@ -269,6 +323,38 @@ export class SourceManager {
     }
 
     return output;
+  }
+
+  /**
+   * Indented lines on what a connected MCP source offers beyond tools: resource
+   * and prompt counts with the session tools that read them, and the server's
+   * own instructions (untrusted text: flattened, cut, defanged). Empty when
+   * there is nothing to show.
+   */
+  private formatSourceFeatures(slug: string): string[] {
+    const features = this.config.getSourceFeatures?.(slug);
+    if (!features) return [];
+    const lines: string[] = [];
+
+    const resources = [
+      countLabel(features.resources, 'resource'),
+      countLabel(features.resourceTemplates, 'resource template'),
+    ].filter((label): label is string => label !== null);
+    const prompts = countLabel(features.prompts, 'prompt');
+    if (resources.length > 0 || prompts) {
+      const offers = [...resources, ...(prompts ? [prompts] : [])];
+      const tools = [...(resources.length > 0 ? ['source_list_resources'] : []), ...(prompts ? ['source_list_prompts'] : [])];
+      lines.push(`  Offers ${offers.join(', ')} (${tools.join(' / ')})`);
+    }
+
+    const instructions = features.instructions?.replace(/\s+/g, ' ').trim();
+    if (instructions) {
+      const cut = instructions.length > MAX_SERVER_INSTRUCTIONS_CHARS
+        ? `${instructions.slice(0, MAX_SERVER_INSTRUCTIONS_CHARS - 1).trimEnd()}…`
+        : instructions;
+      lines.push(`  Server instructions: ${sourceLine(cut)}`);
+    }
+    return lines;
   }
 
   // ============================================================

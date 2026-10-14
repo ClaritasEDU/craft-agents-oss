@@ -27,7 +27,10 @@ export const RPC_CHANNELS = {
     GET_MESSAGES: 'sessions:getMessages',
     SEND_MESSAGE: 'sessions:sendMessage',
     CANCEL: 'sessions:cancel',
+    // Legacy name of STOP_BACKGROUND_TASK for shells (older clients); same handler.
     KILL_SHELL: 'sessions:killShell',
+    GET_BACKGROUND_TASK_OUTPUT: 'sessions:getBackgroundTaskOutput',
+    STOP_BACKGROUND_TASK: 'sessions:stopBackgroundTask',
     RESPOND_TO_PERMISSION: 'sessions:respondToPermission',
     RESPOND_TO_CREDENTIAL: 'sessions:respondToCredential',
     COMMAND: 'sessions:command',
@@ -55,8 +58,6 @@ export const RPC_CHANNELS = {
     ABORT: 'transfer:abort',
   },
   tasks: {
-    // Legacy: background-task output (disabled-feature remnant). Kept for back-compat; retire later.
-    GET_OUTPUT: 'tasks:getOutput',
     // Conductor — the Tasks DAG runner.
     VALIDATE: 'tasks:validate',
     CREATE: 'tasks:create',
@@ -258,6 +259,7 @@ export const RPC_CHANNELS = {
     START: 'oauth:start',
     COMPLETE: 'oauth:complete',
     CANCEL: 'oauth:cancel',
+    STATUS: 'oauth:status',
     REVOKE: 'oauth:revoke',
   },
   workspace: {
@@ -338,6 +340,16 @@ export const RPC_CHANNELS = {
     GET_STATUS: 'rtk:getStatus',
     GET_GAIN: 'rtk:getGain',
   },
+  decisions: {
+    GET_SETTINGS: 'decisions:getSettings',
+    SET_SETTINGS: 'decisions:setSettings',
+    GET_STATUS: 'decisions:getStatus',
+    SET_API_KEY: 'decisions:setApiKey',
+    DELETE_API_KEY: 'decisions:deleteApiKey',
+    TEST: 'decisions:test',
+    PROBE_SERVER: 'decisions:probeServer',
+    GET_USAGE: 'decisions:getUsage',
+  },
   badge: {
     REFRESH: 'badge:refresh',
     SET_ICON: 'badge:setIcon',
@@ -403,6 +415,32 @@ export const RPC_CHANNELS = {
     UPLOAD_ASSET: 'projects:uploadAsset',
     DELETE_ASSET: 'projects:deleteAsset',
     CHANGED: 'projects:changed',
+  },
+  pages: {
+    GET: 'pages:get',
+    GET_ONE: 'pages:getOne',
+    CREATE: 'pages:create',
+    UPDATE: 'pages:update',
+    DELETE: 'pages:delete',
+    GET_CONTENT: 'pages:getContent',
+    SET_CONTENT: 'pages:setContent',
+    GET_DATA: 'pages:getData',
+    LIST_GRANTS: 'pages:listGrants',
+    ISSUE_GRANT: 'pages:issueGrant',
+    REVOKE_GRANT: 'pages:revokeGrant',
+    CREATE_LEASE: 'pages:createLease',
+    RELEASE_LEASE: 'pages:releaseLease',
+    EXECUTE_ACTION: 'pages:executeAction',
+    CANCEL_ACTION: 'pages:cancelAction',
+    GET_SHARE_CAPABILITIES: 'pages:getShareCapabilities',
+    GET_SHARE_DATA_SCAN: 'pages:getShareDataScan',
+    PUBLISH: 'pages:publish',
+    SET_PUBLICATION_PASSWORD: 'pages:setPublicationPassword',
+    UNPUBLISH: 'pages:unpublish',
+    PUBLISH_CLAUDE_ARTIFACT: 'pages:publishClaudeArtifact',
+    GET_THUMBNAIL: 'pages:getThumbnail',
+    REGENERATE_THUMBNAIL: 'pages:regenerateThumbnail',
+    CHANGED: 'pages:changed',
   },
   messaging: {
     // WhatsApp subprocess → Gateway (subprocess invokes on server)
